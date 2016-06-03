@@ -44,7 +44,7 @@
 #endif
 
 #define MAX_TOPLEVEL 64
-#define MAX_CAPACITY (1024 * 1024)
+#define MAX_CAPACITY 0x400000
 
 struct toplevel {
     int pid;
@@ -533,15 +533,20 @@ fsat_ftruncate(const char *path, off_t size, struct fuse_file_info *fi) {
     return 0 == r ? 0 : -errno;
 }
 
-#ifdef HAVE_UTIMENSAT
 static int
 fsat_utimens(const char *path, const struct timespec ts[2]) {
+#ifdef HAVE_UTIMENSAT
     int r = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
+#else
+    struct utimbuf buf;
+    buf.actime = ts[0].tv_sec;
+    buf.modtime = ts[1].tv_sec;
+    int r = utime(path, &buf);
+#endif
     if (0 == r)
         op1('w', path);
     return 0 == r ? 0 : -errno;
 }
-#endif
 
 static int
 fsat_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
@@ -902,9 +907,7 @@ static struct fuse_operations fsat_oper = {
     .chown = fsat_chown,
     .truncate = fsat_truncate,
     .ftruncate = fsat_ftruncate,
-#ifdef HAVE_UTIMENSAT
     .utimens = fsat_utimens,
-#endif
     .create = fsat_create,
     .open = fsat_open,
     .read = fsat_read,
