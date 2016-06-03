@@ -6,6 +6,15 @@
 #define HAVE_FDATASYNC
 #endif
 
+#if defined __APPLE__
+#define HAVE_SETXATTR
+#define G_PREFIX "org"
+#define G_KAUTH_FILESEC_XATTR G_PREFIX ".apple.system.Security"
+#define A_PREFIX "com"
+#define A_KAUTH_FILESEC_XATTR A_PREFIX ".apple.system.Security"
+#define XATTR_APPLE_PREFIX "com.apple."
+#endif
+
 #define _GNU_SOURCE
 
 #include <fuse.h>
@@ -141,7 +150,7 @@ filldh(struct fsat_dirh *d, const char *path, DIR *dp, struct toplevel *tl) {
     d->dp = dp;
     d->tl = tl;
     d->offset = 0;
-    d->entry = NULL;
+    d->entry = 0;
     return (uintptr_t)d;
 }
 
@@ -175,14 +184,14 @@ op2(int o, const char *p1, const char *p2) {
     struct toplevel *tl = lookup_toplevel();
     char *p;
     size_t s1 = strlen(p1);
-    size_t s2 = p2? strlen(p2) : 0;
+    size_t s2 = p2 ? strlen(p2) : 0;
     size_t sofar;
-    size_t sz = 1                               // op
-                + 1                             // |
-                + s1                            // p1
-                + (p2 ? 1 : 0)                  // |
-                + s2                            // p2
-                + 1                             // \n
+    size_t sz = 1               // op
+                + 1             // |
+                + s1            // p1
+                + (p2 ? 1 : 0)  // |
+                + s2            // p2
+                + 1             // \n
         ;
     sofar = __sync_fetch_and_add(&tl->sofar, sz);
     if (sofar + sz < MAX_CAPACITY) {
@@ -361,7 +370,7 @@ fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
 
         if (offset != d->offset) {
             seekdir(d->dp, offset);
-            d->entry = NULL;
+            d->entry = 0;
             d->offset = offset;
         }
         while (1) {
@@ -388,7 +397,7 @@ fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
             if (filler(buf, d->entry->d_name, &st, nextoff))
                 break;
 
-            d->entry = NULL;
+            d->entry = 0;
             d->offset = nextoff;
         }
         op1('l', d->path);
@@ -518,16 +527,20 @@ static int
 fsat_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
     int fd;
     struct fsat_fileh *f;
+    int r = 0;
     assert(!is_ops(path));
     fd = open(path, fi->flags, mode);
-    if (-1 == fd)
-        return -errno;
-    f = malloc(sizeof(*f));
-    if (!f)
-        return -ENOMEM;
-    fi->fh = fillfh(f, path, fd, 0);
-    op1('w', f->path);
-    return 0;
+    if (fd < 0)
+        r = -errno;
+    if (!r)
+        f = malloc(sizeof(*f));
+    if (!r && !f)
+        r = -ENOMEM;
+    if (!r && f) {
+        fi->fh = fillfh(f, path, fd, 0);
+        op1('w', f->path);
+    }
+    return r;
 }
 
 static struct toplevel *
@@ -541,10 +554,10 @@ open_ops(const char *path) {
 
 static int
 fsat_open(const char *path, struct fuse_file_info *fi) {
-    int fd = -1;
     struct fsat_fileh *f;
     struct toplevel *tl;
-
+    int fd = -1;
+    int r = 0;
     if (is_ops(path)) {
         tl = open_ops(path);
         fd = -1;
@@ -553,13 +566,15 @@ fsat_open(const char *path, struct fuse_file_info *fi) {
         fd = open(path, fi->flags);
         tl = 0;
     }
-    if (fd < 0 && 0 == tl)
-        return -errno;
-    f = malloc(sizeof(*f));
-    if (!f)
-        return -ENOMEM;
-    fi->fh = fillfh(f, path, fd, tl);
-    return 0;
+    if (fd < 0 && !tl)
+        r = -errno;
+    if (!r)
+        f = malloc(sizeof(*f));
+    if (!r && !f)
+        r = -ENOMEM;
+    if (!r)
+        fi->fh = fillfh(f, path, fd, tl);
+    return r;
 }
 
 static int
@@ -589,36 +604,40 @@ static int
 fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
               off_t offset, struct fuse_file_info *fi) {
     struct fuse_bufvec *src;
-    struct fuse_buf *b;
+    struct fuse_buf *b = 0;
     struct fsat_fileh *f = fileh(fi);
+    struct toplevel *tl = f->tl;
+    int fd = f->fd;
+    ssize_t sz = 0;
+    int r = 0;
     src = malloc(sizeof(*src));
     if (!src)
-        return -ENOMEM;
-
-    if (0 <= f->fd) {
-        *src = FUSE_BUFVEC_INIT(size);
-        b = src->buf;
-        b->flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-        b->fd = f->fd;
-        b->pos = offset;
-    } else {
-        struct toplevel *tl = f->tl;
-        size_t sz = sszclamp(0, tl->sofar - offset, size);
+        r = -ENOMEM;
+    if (!r) {
+        sz = 0 <= fd ? size : sszclamp(0, tl->sofar - offset, size);
         *src = FUSE_BUFVEC_INIT(sz);
         b = src->buf;
-        if (sz) {
-            b->mem = malloc(sz);
-            if (!b->mem) {
-                free(src);
-                return -ENOMEM;
-            }
-        }
         b->pos = offset;
-        memcpy(b->mem, tl->ops + offset, sz);
     }
-    *bufp = src;
-    op1('r', f->path);
-    return 0;
+    if (!r && 0 <= fd) {
+        b->flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+        b->fd = fd;
+    }
+    if (!r && tl)
+        b->mem = malloc(sz);
+    if (!r && tl && !b->mem)
+        r = -ENOMEM;
+    if (!r && tl)
+        memcpy(b->mem, tl->ops + offset, sz);
+    if (r && b && b->mem)
+        free(b->mem);
+    if (r && src)
+        free(src);
+    if (!r) {
+        *bufp = src;
+        op1('r', f->path);
+    }
+    return r;
 }
 
 static int
@@ -715,16 +734,54 @@ fsat_fallocate(const char *path, int mode, off_t offset, off_t length,
 #ifdef HAVE_SETXATTR
 static int
 fsat_setxattr(const char *path, const char *name, const char *value,
-              size_t size, int flags) {
+              size_t size, int flags
+#if defined __APPLE__
+              ,
+              uint32_t position
+#endif
+              ) {
+#if defined __APPLE__
+    int r;
+    if (!strncmp(name, XATTR_APPLE_PREFIX, sizeof(XATTR_APPLE_PREFIX) - 1)) {
+        flags &= ~(XATTR_NOSECURITY);
+    }
+    if (!strcmp(name, A_KAUTH_FILESEC_XATTR)) {
+        char new_name[MAXPATHLEN];
+        memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
+        memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
+        r = setxattr(path, new_name, value, size, position, flags);
+    } else {
+        r = setxattr(path, name, value, size, position, flags);
+    }
+
+#else
     int r = lsetxattr(path, name, value, size, flags);
+#endif
     if (0 == r)
         op1('w', path);
     return 0 == r ? 0 : -errno;
 }
 
 static int
-fsat_getxattr(const char *path, const char *name, char *value, size_t size) {
-    int r = lgetxattr(path, name, value, size);
+fsat_getxattr(const char *path, const char *name, char *value, size_t size
+#if defined __APPLE__
+              ,
+              uint32_t position
+#endif
+              ) {
+#if defined __APPLE__
+    int r;
+    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
+        char new_name[MAXPATHLEN];
+        memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
+        memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
+        r = getxattr(path, new_name, value, size, position, XATTR_NOFOLLOW);
+    } else {
+        r = getxattr(path, name, value, size, position, XATTR_NOFOLLOW);
+    }
+#else
+    int r = lgetxattr(path, name, value, size)
+#endif
     if (0 <= r)
         op1('q', path);
     return 0 <= r ? r : -errno;
@@ -732,7 +789,35 @@ fsat_getxattr(const char *path, const char *name, char *value, size_t size) {
 
 static int
 fsat_listxattr(const char *path, char *list, size_t size) {
+#if defined __APPLE__
+    ssize_t r = listxattr(path, list, size, XATTR_NOFOLLOW);
+    if (r > 0) {
+        if (list) {
+            size_t len = 0;
+            char *curr = list;
+            do {
+                size_t thislen = strlen(curr) + 1;
+                if (strcmp(curr, G_KAUTH_FILESEC_XATTR) == 0) {
+                    memmove(curr, curr + thislen, r - len - thislen);
+                    r -= thislen;
+                    break;
+                }
+                curr += thislen;
+                len += thislen;
+            } while (len < r);
+        } else {
+            /*
+            ssize_t res2 = getxattr(path, G_KAUTH_FILESEC_XATTR, NULL, 0, 0,
+                                    XATTR_NOFOLLOW);
+            if (res2 >= 0) {
+                    res -= sizeof(G_KAUTH_FILESEC_XATTR);
+            }
+            */
+        }
+    }
+#else
     int r = llistxattr(path, list, size);
+#endif
     if (0 <= r)
         op1('q', path);
     return 0 <= r ? r : -errno;
@@ -740,7 +825,18 @@ fsat_listxattr(const char *path, char *list, size_t size) {
 
 static int
 fsat_removexattr(const char *path, const char *name) {
+#if defined __APPLE__
+    int r;
+    if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
+        char new_name[MAXPATHLEN];
+        memcpy(new_name, A_KAUTH_FILESEC_XATTR, sizeof(A_KAUTH_FILESEC_XATTR));
+        memcpy(new_name, G_PREFIX, sizeof(G_PREFIX) - 1);
+        r = removexattr(path, new_name, XATTR_NOFOLLOW);
+    } else
+        r = removexattr(path, name, XATTR_NOFOLLOW);
+#else
     int r = lremovexattr(path, name);
+#endif
     if (0 == r)
         op1('w', path);
     return 0 == r ? 0 : -errno;
@@ -818,7 +914,7 @@ static struct fuse_operations fsat_oper = {
 int
 main(int argc, char *argv[]) {
     char *mpt = "traced";
-    char *newargs[] = {argv[0], "-f", mpt};
+    char *args[] = {argv[0], "-f", mpt};
 #if defined __linux__
     umount(mpt);
 #else
@@ -827,6 +923,5 @@ main(int argc, char *argv[]) {
     mkdir(mpt, 0755);
     umask(0);
     s_root = getppid();
-    return fuse_main(sizeof(newargs) / sizeof(newargs[0]), newargs, &fsat_oper,
-                     NULL);
+    return fuse_main(sizeof(args) / sizeof(args[0]), args, &fsat_oper, 0);
 }
