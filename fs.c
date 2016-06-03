@@ -54,7 +54,8 @@ struct toplevel {
 
 static struct toplevel s_toplevel[MAX_TOPLEVEL] = {{0}};
 static uint32_t s_ntoplevel = 0;
-static int s_root;
+static int s_root = 0;
+static const char *s_generator = 0;
 
 struct fsat_dirh {
     DIR *dp;
@@ -237,6 +238,18 @@ ops_pid(const char *path) {
 }
 
 static int
+generate(const char *path) {
+    int r;
+    if (s_generator) {
+        char buf[PATH_MAX + 32];
+        snprintf(buf, sizeof(buf), "%s '%s'", s_generator, path);
+        r = 0 == system(buf);
+    } else
+        r = 0;
+    return r;
+}
+
+static int
 stat_toplevel(struct toplevel *tl, struct stat *st) {
     memset(st, 0, sizeof(*st));
     st->st_nlink = 1;
@@ -281,6 +294,8 @@ fsat_getattr(const char *path, struct stat *st) {
         r = lstat(path, st);
     if (0 == r)
         op1('q', path);
+    else if (generate(path))
+        r = -fsat_getattr(path, st);
     return 0 == r ? 0 : -errno;
 }
 
@@ -294,6 +309,8 @@ fsat_fgetattr(const char *path, struct stat *st, struct fuse_file_info *fi) {
         r = stat_toplevel(f->tl, st);
     if (0 == r)
         op1('q', f->path);
+    else if (generate(path))
+        r = -fsat_fgetattr(path, st, fi);
     return 0 == r ? 0 : -errno;
 }
 
@@ -306,6 +323,8 @@ fsat_access(const char *path, int mask) {
         r = access(path, mask);
     if (0 == r)
         op1('q', path);
+    else if (generate(path))
+        r = -fsat_access(path, mask);
     return 0 == r ? 0 : -errno;
 }
 
@@ -316,7 +335,8 @@ fsat_readlink(const char *path, char *buf, size_t size) {
     if (0 <= r) {
         buf[r] = '\0';
         op1('r', path);
-    }
+    } else
+        generate(path);
     return 0 <= r ? 0 : -errno;
 }
 
@@ -911,10 +931,34 @@ static struct fuse_operations fsat_oper = {
     .flag_nopath = 1,
 };
 
+static void
+usage(const char *nm) {
+    fprintf(stderr, "usage: %s [-r rootpid] [-g generator]\n", nm);
+    exit(1);
+}
+
+static void
+opts(int argc, char *argv[]) {
+    int ch;
+    while ((ch = getopt(argc, argv, "r:g:")) != -1) {
+        switch (ch) {
+            case 'r':
+                s_root = atoi(optarg);
+                break;
+            case 'g':
+                s_generator = optarg;
+                break;
+            default:
+                usage(argv[0]);
+        }
+    }
+}
+
 int
 main(int argc, char *argv[]) {
     char *mpt = "traced";
     char *args[] = {argv[0], "-f", mpt};
+    opts(argc, argv);
 #if defined __linux__
     umount(mpt);
 #else
@@ -922,6 +966,7 @@ main(int argc, char *argv[]) {
 #endif
     mkdir(mpt, 0755);
     umask(0);
-    s_root = getppid();
+    if (!s_root)
+        s_root = getppid();
     return fuse_main(sizeof(args) / sizeof(args[0]), args, &fsat_oper, 0);
 }
