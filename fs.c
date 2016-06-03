@@ -1,5 +1,11 @@
 #define FUSE_USE_VERSION 26
 
+#if defined __linux__
+#define HAVE_SETXATTR
+#define HAVE_UTIMENSAT
+#define HAVE_FDATASYNC
+#endif
+
 #define _GNU_SOURCE
 
 #include <fuse.h>
@@ -74,7 +80,7 @@ calc_ppid(int pid) {
 #if defined __linux__
     char buf[64];
     int fd;
-    char * spid;
+    char *spid;
     snprintf(buf, sizeof(buf), "/proc/%d/stat", pid);
     fd = open(buf, O_RDONLY);
     read(fd, buf, sizeof(buf));
@@ -168,14 +174,14 @@ static void
 op2(int o, const char *p1, const char *p2) {
     struct toplevel *tl = lookup_toplevel();
     char *p;
-    size_t s1;
-    size_t s2;
+    size_t s1 = strlen(p1);
+    size_t s2 = p2? strlen(p2) : 0;
     size_t sofar;
     size_t sz = 1                               // op
                 + 1                             // |
-                + (s1 = strlen(p1))             // p1
+                + s1                            // p1
                 + (p2 ? 1 : 0)                  // |
-                + (p2 ? (s2 = strlen(p2)) : 0)  // p2
+                + s2                            // p2
                 + 1                             // \n
         ;
     sofar = __sync_fetch_and_add(&tl->sofar, sz);
@@ -701,7 +707,7 @@ fsat_fallocate(const char *path, int mode, off_t offset, off_t length,
     else
         r = posix_fallocate(f->fd, offset, length);
     if (0 == r)
-        op1('w', fi->path);
+        op1('w', f->path);
     return 0 == r ? 0 : -r;
 }
 #endif
