@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <sys/file.h>
+#include <sys/mount.h>
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
@@ -27,16 +28,16 @@
 #include <libproc.h>
 #endif
 
-static const unsigned max_toplevel = 64;
-static const unsigned max_capacity = 1024 * 1024;
+#define MAX_TOPLEVEL 64
+#define MAX_CAPACITY (1024 * 1024)
 
 struct toplevel {
     int pid;
     uint32_t sofar;
-    char ops[max_capacity];
+    char ops[MAX_CAPACITY];
 };
 
-static struct toplevel s_toplevel[max_toplevel] = {{0}};
+static struct toplevel s_toplevel[MAX_TOPLEVEL] = {{0}};
 static uint32_t s_ntoplevel = 0;
 static int s_root;
 
@@ -57,17 +58,30 @@ struct fsat_fileh {
 static int
 lookup_pid(int pid) {
     unsigned tli;
-    for (tli = 0; tli < max_toplevel; tli++)
+    for (tli = 0; tli < MAX_TOPLEVEL; tli++)
         if (s_toplevel[tli].pid == pid)
             break;
-    return tli < max_toplevel ? tli : -1;
+    return tli < MAX_TOPLEVEL ? tli : -1;
 }
 
 static int
 calc_ppid(int pid) {
+#if defined __APPLE__
     struct proc_bsdinfo bi;
     int r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bi, sizeof(bi));
     return r ? bi.pbi_ppid : 0;
+#endif
+#if defined __linux__
+    char buf[64];
+    int fd;
+    char * spid;
+    snprintf(buf, sizeof(buf), "/proc/%d/stat", pid);
+    fd = open(buf, O_RDONLY);
+    read(fd, buf, sizeof(buf));
+    close(fd);
+    spid = strchr(buf, ')');
+    return atoi(spid + 3);
+#endif
 }
 
 static int
@@ -92,7 +106,7 @@ lookup_toplevel() {
         if (tli < 0) {
             struct toplevel *tl;
             tli = __sync_fetch_and_add(&s_ntoplevel, 1);
-            tl = s_toplevel + tli % max_toplevel;
+            tl = s_toplevel + tli % MAX_TOPLEVEL;
             if (tl->pid != tlpid) {
                 tl->sofar = 0;
                 tl->pid = tlpid;
@@ -165,7 +179,7 @@ op2(int o, const char *p1, const char *p2) {
                 + 1                             // \n
         ;
     sofar = __sync_fetch_and_add(&tl->sofar, sz);
-    if (sofar + sz < max_capacity) {
+    if (sofar + sz < MAX_CAPACITY) {
         p = tl->ops + sofar;
         *p++ = o;
         *p++ = '|';
@@ -288,7 +302,7 @@ fsat_readlink(const char *path, char *buf, size_t size) {
         buf[r] = '\0';
         op1('r', path);
     }
-    return 0 <= r ? r : -errno;
+    return 0 <= r ? 0 : -errno;
 }
 
 static int
@@ -319,7 +333,8 @@ fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
     struct fsat_dirh *d = dirh(fi);
 
     if (d->tl) {
-        for (unsigned i = 0; i < max_toplevel; i++) {
+        unsigned i;
+        for (i = 0; i < MAX_TOPLEVEL; i++) {
             struct toplevel *tl = s_toplevel + i;
             char nm[32];
             struct stat st;
@@ -798,7 +813,11 @@ int
 main(int argc, char *argv[]) {
     char *mpt = "traced";
     char *newargs[] = {argv[0], "-f", mpt};
+#if defined __linux__
+    umount(mpt);
+#else
     unmount(mpt, 0);
+#endif
     mkdir(mpt, 0755);
     umask(0);
     s_root = getppid();
