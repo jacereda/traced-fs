@@ -780,7 +780,7 @@ fsat_getxattr(const char *path, const char *name, char *value, size_t size
         r = getxattr(path, name, value, size, position, XATTR_NOFOLLOW);
     }
 #else
-    int r = lgetxattr(path, name, value, size)
+    int r = lgetxattr(path, name, value, size);
 #endif
     if (0 <= r)
         op1('q', path);
