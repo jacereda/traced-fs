@@ -63,12 +63,14 @@ struct fsat_dirh {
     struct dirent *entry;
     off_t offset;
     char path[PATH_MAX];
+    char reported[127];
 };
 
 struct fsat_fileh {
     struct toplevel *tl;
     int fd;
     char path[PATH_MAX];
+    char reported[127];
 };
 
 static int
@@ -137,21 +139,23 @@ lookup_toplevel() {
 
 static uintptr_t
 fillfh(struct fsat_fileh *f, const char *path, int fd, struct toplevel *tl) {
-    strncpy(f->path, path, PATH_MAX);
-    f->path[PATH_MAX - 1] = 0;
     f->fd = fd;
     f->tl = tl;
+    strncpy(f->path, path, PATH_MAX);
+    f->path[PATH_MAX - 1] = 0;
+    bzero(f->reported, sizeof(f->reported));
     return (uintptr_t)f;
 }
 
 static uintptr_t
 filldh(struct fsat_dirh *d, const char *path, DIR *dp, struct toplevel *tl) {
-    strncpy(d->path, path, PATH_MAX);
-    d->path[PATH_MAX - 1] = 0;
     d->dp = dp;
     d->tl = tl;
     d->offset = 0;
     d->entry = 0;
+    strncpy(d->path, path, PATH_MAX);
+    d->path[PATH_MAX - 1] = 0;
+    bzero(d->reported, sizeof(d->reported));
     return (uintptr_t)d;
 }
 
@@ -216,6 +220,14 @@ op2(int o, const char *p1, const char *p2) {
 static void
 op1(int o, const char *p1) {
     op2(o, p1, 0);
+}
+
+static void
+sop1(int o, char *reported, const char *p1) {
+    if (!reported[o]) {
+        op1(o, p1);
+        reported[o] = 1;
+    }
 }
 
 static const char *s_ops = "/.ops";
@@ -308,7 +320,7 @@ fsat_fgetattr(const char *path, struct stat *st, struct fuse_file_info *fi) {
     else
         r = stat_toplevel(f->tl, st);
     if (0 == r)
-        op1('q', f->path);
+        sop1('q', f->reported, f->path);
     else if (generate(path))
         r = -fsat_fgetattr(path, st, fi);
     return 0 == r ? 0 : -errno;
@@ -420,7 +432,7 @@ fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
             d->entry = 0;
             d->offset = nextoff;
         }
-        op1('l', d->path);
+        sop1('l', d->reported, d->path);
     }
     return 0;
 }
@@ -529,7 +541,7 @@ fsat_ftruncate(const char *path, off_t size, struct fuse_file_info *fi) {
         r = -1;
     }
     if (0 == r)
-        op1('w', f->path);
+        sop1('w', f->reported, f->path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -563,7 +575,7 @@ fsat_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
         r = -ENOMEM;
     if (!r && f) {
         fi->fh = fillfh(f, path, fd, 0);
-        op1('w', f->path);
+        sop1('w', f->reported, f->path);
     }
     return r;
 }
@@ -621,7 +633,7 @@ fsat_read(const char *path, char *buf, size_t size, off_t offset,
     else
         r = read_ops(f->tl, buf, size, offset);
     if (0 <= r)
-        op1('r', f->path);
+        sop1('r', f->reported, f->path);
     return 0 <= r ? r : -errno;
 }
 
@@ -660,7 +672,7 @@ fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
         free(src);
     if (!r) {
         *bufp = src;
-        op1('r', f->path);
+        sop1('r', f->reported, f->path);
     }
     return r;
 }
@@ -677,7 +689,7 @@ fsat_write(const char *path, const char *buf, size_t size, off_t offset,
         r = -1;
     }
     if (0 <= r)
-        op1('w', f->path);
+        sop1('w', f->reported, f->path);
     return 0 <= r ? r : -errno;
 }
 
@@ -693,7 +705,7 @@ fsat_write_buf(const char *path, struct fuse_bufvec *buf, off_t offset,
         b->flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
         b->fd = f->fd;
         b->pos = offset;
-        op1('w', f->path);
+        sop1('w', f->reported, f->path);
         r = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
     } else
         r = -ENOENT;
@@ -751,7 +763,7 @@ fsat_fallocate(const char *path, int mode, off_t offset, off_t length,
     else
         r = posix_fallocate(f->fd, offset, length);
     if (0 == r)
-        op1('w', f->path);
+        sop1('w', f->reported, f->path);
     return 0 == r ? 0 : -r;
 }
 #endif
