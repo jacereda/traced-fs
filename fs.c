@@ -969,16 +969,23 @@ opts(int argc, char *argv[]) {
     }
 }
 
+static void
+unmount_prev(const char *mpt) {
+#if defined __linux__
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "fusermount -u '%s'", mpt);
+    system(cmd);
+#else
+    unmount(mpt, 0);
+#endif
+}
+
 int
 main(int argc, char *argv[]) {
     char *mpt = "traced";
     char *args[] = {argv[0], "-f", mpt};
     opts(argc, argv);
-#if defined __linux__
-    umount(mpt);
-#else
-    unmount(mpt, 0);
-#endif
+    unmount_prev(mpt);
     mkdir(mpt, 0755);
     umask(0);
     if (!s_root)
