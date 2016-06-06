@@ -253,7 +253,7 @@ static int
 generate(const char *path) {
     int r;
     if (s_generator) {
-        char buf[PATH_MAX + 32];
+        char buf[2 * PATH_MAX + 32];
         snprintf(buf, sizeof(buf), "%s '%s'", s_generator, path);
         r = 0 == system(buf);
     } else
