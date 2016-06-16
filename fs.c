@@ -39,22 +39,9 @@
 #include <sys/xattr.h>
 #endif
 
-#if defined __APPLE__
-#include <libproc.h>
-#endif
+#include "ppid.h"
+#include "toplevel.h"
 
-#define MAX_TOPLEVEL 64
-#define MAX_CAPACITY 0x400000
-
-struct toplevel {
-    int pid;
-    uint32_t sofar;
-    char ops[MAX_CAPACITY];
-};
-
-static struct toplevel s_toplevel[MAX_TOPLEVEL] = {{0}};
-static uint32_t s_ntoplevel = 0;
-static int s_root = 0;
 static const char *s_generator = 0;
 
 struct dirh {
@@ -73,67 +60,11 @@ struct fileh {
     char reported[127];
 };
 
-static int
-lookup_pid(int pid) {
-    unsigned tli;
-    for (tli = 0; tli < MAX_TOPLEVEL; tli++)
-        if (s_toplevel[tli].pid == pid)
-            break;
-    return tli < MAX_TOPLEVEL ? tli : -1;
-}
-
-static int
-calc_ppid(int pid) {
-#if defined __APPLE__
-    struct proc_bsdinfo bi;
-    int r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bi, sizeof(bi));
-    return r ? bi.pbi_ppid : 0;
-#endif
-#if defined __linux__
-    char buf[64];
-    int fd;
-    char *spid;
-    snprintf(buf, sizeof(buf), "/proc/%d/stat", pid);
-    fd = open(buf, O_RDONLY);
-    read(fd, buf, sizeof(buf));
-    close(fd);
-    spid = strchr(buf, ')');
-    return atoi(spid + 3);
-#endif
-}
-
-static int
-calc_toplevel_pid(int pid) {
-    int ppid = calc_ppid(pid);
-    int tlpid;
-    if (ppid == s_root)
-        tlpid = pid;
-    else if (ppid <= 1)
-        tlpid = 1;
-    else
-        tlpid = calc_toplevel_pid(ppid);
-    return tlpid;
-}
-
 struct toplevel *
 lookup_toplevel() {
     struct fuse_context *ctx = fuse_get_context();
-    if (!ctx->private_data) {
-        int tlpid = calc_toplevel_pid(ctx->pid);
-        int tli = lookup_pid(tlpid);
-        if (tli < 0) {
-            struct toplevel *tl;
-            tli = __sync_fetch_and_add(&s_ntoplevel, 1);
-            tl = s_toplevel + tli % MAX_TOPLEVEL;
-            if (tl->pid != tlpid) {
-                tl->sofar = 0;
-                tl->pid = tlpid;
-            }
-            tli = lookup_pid(tlpid);
-            assert(0 <= tli);
-        }
-        ctx->private_data = s_toplevel + tli;
-    }
+    if (!ctx->private_data)
+        ctx->private_data = toplevel_lookup_create(ctx->pid);
     return ctx->private_data;
 }
 
@@ -292,9 +223,9 @@ stat_ops(const char *path, struct stat *st) {
         stat_root(st);
         r = 0;
     } else {
-        int tli = lookup_pid(pid);
-        if (0 <= tli) {
-            stat_toplevel(s_toplevel + tli, st);
+        struct toplevel *tl = toplevel_lookup(pid);
+        if (tl) {
+            stat_toplevel(tl, st);
             r = 0;
         } else {
             errno = ENOENT;
@@ -310,8 +241,7 @@ getattr_cb(const char *path, struct stat *st) {
     if (is_ops(path))
         r = stat_ops(path, st);
     else if (is_rootpid(path)) {
-        s_root = atoi(path + s_rootpidlen);
-        fprintf(stderr, "rootpid set to %d\n", s_root);
+        toplevel_set_root(atoi(path + s_rootpidlen));
         r = -1;
         errno = ENOENT;
     } else
@@ -344,8 +274,7 @@ access_cb(const char *path, int mask) {
     if (is_ops(path))
         r = 0;
     else if (is_rootpid(path)) {
-        s_root = atoi(path + s_rootpidlen);
-        fprintf(stderr, "rootpid set to %d\n", s_root);
+        toplevel_set_root(atoi(path + s_rootpidlen));
         r = -1;
         errno = ENOENT;
     } else
@@ -375,7 +304,7 @@ opendir_cb(const char *path, struct fuse_file_info *fi) {
     struct toplevel *tl = 0;
     int r;
     if (is_ops(path)) {
-        tl = s_toplevel;
+        tl = g_toplevel;
         fi->direct_io = 1;
     } else
         dp = opendir(path);
@@ -399,7 +328,7 @@ readdir_cb(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
     if (d->tl) {
         unsigned i;
         for (i = 0; i < MAX_TOPLEVEL; i++) {
-            struct toplevel *tl = s_toplevel + i;
+            struct toplevel *tl = g_toplevel + i;
             char nm[32];
             struct stat st;
             if (!tl->pid)
@@ -604,10 +533,10 @@ create_cb(const char *path, mode_t mode, struct fuse_file_info *fi) {
 static struct toplevel *
 open_ops(const char *path) {
     int pid = ops_pid(path);
-    int tli = lookup_pid(pid);
-    if (tli < 0)
-        errno = ENOENT;
-    return tli < 0 ? 0 : s_toplevel + tli;
+    struct toplevel *tl = toplevel_lookup(pid);
+    if (!tl)
+        errno = -ENOENT;
+    return tl;
 }
 
 static int
@@ -621,10 +550,9 @@ open_cb(const char *path, struct fuse_file_info *fi) {
         fd = -1;
         fi->direct_io = 1;
     } else if (is_rootpid(path)) {
-        s_root = atoi(path + s_rootpidlen);
+        toplevel_set_root(atoi(path + s_rootpidlen));
         fd = -1;
         tl = 0;
-        fprintf(stderr, "rootpid set to %d\n", s_root);
         errno = ENOENT;
     } else {
         fd = open(path, fi->flags);
@@ -1036,7 +964,5 @@ main(int argc, char *argv[]) {
     // unmount_prev(mpt);
     // mkdir(mpt, 0700);
     umask(0);
-    if (!s_root)
-        s_root = getppid();
     return fuse_main(nargs, args, &oper, 0);
 }
