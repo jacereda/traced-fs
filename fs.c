@@ -1,4 +1,4 @@
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 29
 
 #if defined __linux__
 #define HAVE_SETXATTR
@@ -130,7 +130,7 @@ lookup_toplevel() {
                 tl->pid = tlpid;
             }
             tli = lookup_pid(tlpid);
-            assert(tli >= 0);
+            assert(0 <= tli);
         }
         ctx->private_data = s_toplevel + tli;
     }
@@ -232,10 +232,17 @@ sop1(int o, char *reported, const char *p1) {
 
 static const char *s_ops = "/.ops";
 static const int s_opslen = 5;
+static const char *s_rootpid = "/.rootpid-";
+static const int s_rootpidlen = 10;
 
 static int
 is_ops(const char *path) {
     return 0 == strncmp(path, s_ops, s_opslen);
+}
+
+static int
+is_rootpid(const char *path) {
+    return 0 == strncmp(path, s_rootpid, s_rootpidlen);
 }
 
 static int
@@ -302,7 +309,12 @@ fsat_getattr(const char *path, struct stat *st) {
     int r;
     if (is_ops(path))
         r = stat_ops(path, st);
-    else
+    else if (is_rootpid(path)) {
+        s_root = atoi(path + s_rootpidlen);
+        fprintf(stderr, "rootpid set to %d\n", s_root);
+        r = -1;
+        errno = ENOENT;
+    } else
         r = lstat(path, st);
     if (0 == r)
         op1('q', path);
@@ -331,7 +343,12 @@ fsat_access(const char *path, int mask) {
     int r;
     if (is_ops(path))
         r = 0;
-    else
+    else if (is_rootpid(path)) {
+        s_root = atoi(path + s_rootpidlen);
+        fprintf(stderr, "rootpid set to %d\n", s_root);
+        r = -1;
+        errno = ENOENT;
+    } else
         r = access(path, mask);
     if (0 == r)
         op1('q', path);
@@ -347,8 +364,8 @@ fsat_readlink(const char *path, char *buf, size_t size) {
     if (0 <= r) {
         buf[r] = '\0';
         op1('r', path);
-    } else
-        generate(path);
+    } else if (generate(path))
+        r = -fsat_readlink(path, buf, size);
     return 0 <= r ? 0 : -errno;
 }
 
@@ -574,6 +591,10 @@ fsat_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
     if (!r && !f)
         r = -ENOMEM;
     if (!r && f) {
+//        fi->direct_io = 1;
+#if defined __APPLE__
+        fi->purge_ubc = 1;
+#endif
         fi->fh = fillfh(f, path, fd, 0);
         sop1('w', f->reported, f->path);
     }
@@ -599,6 +620,12 @@ fsat_open(const char *path, struct fuse_file_info *fi) {
         tl = open_ops(path);
         fd = -1;
         fi->direct_io = 1;
+    } else if (is_rootpid(path)) {
+        s_root = atoi(path + s_rootpidlen);
+        fd = -1;
+        tl = 0;
+        fprintf(stderr, "rootpid set to %d\n", s_root);
+        errno = ENOENT;
     } else {
         fd = open(path, fi->flags);
         tl = 0;
@@ -609,8 +636,13 @@ fsat_open(const char *path, struct fuse_file_info *fi) {
         f = malloc(sizeof(*f));
     if (!r && !f)
         r = -ENOMEM;
-    if (!r)
+    if (!r) {
+//        fi->direct_io = 1;
+#if defined __APPLE__
+        fi->purge_ubc = 1;
+#endif
         fi->fh = fillfh(f, path, fd, tl);
+    }
     return r;
 }
 
@@ -638,6 +670,23 @@ fsat_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static int
+fsat_write(const char *path, const char *buf, size_t size, off_t offset,
+           struct fuse_file_info *fi) {
+    int r;
+    struct fsat_fileh *f = fileh(fi);
+    if (0 <= f->fd)
+        r = pwrite(f->fd, buf, size, offset);
+    else {
+        errno = ENOENT;
+        r = -1;
+    }
+    if (0 <= r)
+        sop1('w', f->reported, f->path);
+    return 0 <= r ? r : -errno;
+}
+
+#if FUSE_MAKE_VERSION(2, 9) <= FUSE_VERSION
+static int
 fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
               off_t offset, struct fuse_file_info *fi) {
     struct fuse_bufvec *src;
@@ -661,7 +710,7 @@ fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
         b->fd = fd;
     }
     if (!r && tl)
-        b->mem = malloc(sz);
+        r = -posix_memalign(&b->mem, getpagesize(), sz);
     if (!r && tl && !b->mem)
         r = -ENOMEM;
     if (!r && tl)
@@ -673,24 +722,12 @@ fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
     if (!r) {
         *bufp = src;
         sop1('r', f->reported, f->path);
+    } else if (!r) {
+        *bufp = src;
+        r = sz;
+        sop1('r', f->reported, f->path);
     }
     return r;
-}
-
-static int
-fsat_write(const char *path, const char *buf, size_t size, off_t offset,
-           struct fuse_file_info *fi) {
-    int r;
-    struct fsat_fileh *f = fileh(fi);
-    if (0 <= f->fd)
-        r = pwrite(f->fd, buf, size, offset);
-    else {
-        errno = ENOENT;
-        r = -1;
-    }
-    if (0 <= r)
-        sop1('w', f->reported, f->path);
-    return 0 <= r ? r : -errno;
 }
 
 static int
@@ -711,6 +748,17 @@ fsat_write_buf(const char *path, struct fuse_bufvec *buf, off_t offset,
         r = -ENOENT;
     return r;
 }
+
+static int
+fsat_flock(const char *path, struct fuse_file_info *fi, int op) {
+    int r;
+    struct fsat_fileh *f = fileh(fi);
+    assert(0 <= f->fd);
+    r = flock(f->fd, op);
+    return r == 0 ? 0 : -errno;
+}
+
+#endif
 
 static int
 fsat_statfs(const char *path, struct statvfs *stbuf) {
@@ -828,7 +876,7 @@ static int
 fsat_listxattr(const char *path, char *list, size_t size) {
 #if defined __APPLE__
     ssize_t r = listxattr(path, list, size, XATTR_NOFOLLOW);
-    if (r > 0) {
+    if (0 < r) {
         if (list) {
             size_t len = 0;
             char *curr = list;
@@ -891,15 +939,6 @@ fsat_lock(const char *path, struct fuse_file_info *fi, int cmd,
 }
 #endif
 
-static int
-fsat_flock(const char *path, struct fuse_file_info *fi, int op) {
-    int r;
-    struct fsat_fileh *f = fileh(fi);
-    assert(0 <= f->fd);
-    r = flock(f->fd, op);
-    return r == 0 ? 0 : -errno;
-}
-
 static struct fuse_operations fsat_oper = {
     .getattr = fsat_getattr,
     .fgetattr = fsat_fgetattr,
@@ -923,9 +962,7 @@ static struct fuse_operations fsat_oper = {
     .create = fsat_create,
     .open = fsat_open,
     .read = fsat_read,
-    .read_buf = fsat_read_buf,
     .write = fsat_write,
-    .write_buf = fsat_write_buf,
     .statfs = fsat_statfs,
     .flush = fsat_flush,
     .release = fsat_release,
@@ -942,8 +979,12 @@ static struct fuse_operations fsat_oper = {
 #ifdef HAVE_LIBULOCKMGR
     .lock = fsat_lock,
 #endif
+#if FUSE_MAKE_VERSION(2, 9) <= FUSE_VERSION
+    .read_buf = fsat_read_buf,
+    .write_buf = fsat_write_buf,
     .flock = fsat_flock,
     .flag_nopath = 1,
+#endif
 };
 
 static void
@@ -983,12 +1024,18 @@ unmount_prev(const char *mpt) {
 int
 main(int argc, char *argv[]) {
     char *mpt = "traced";
-    char *args[] = {argv[0], "-f", mpt};
-    opts(argc, argv);
-    unmount_prev(mpt);
-    mkdir(mpt, 0755);
+    char *args[64];
+    int nargs = argc;
+    assert(argc < sizeof(args) / sizeof(args[0]));
+    memcpy(args, argv, nargs * sizeof(args[0]));
+    //    args[nargs++] = "-o";
+    //    args[nargs++] = "noubc";
+    // args[nargs++] = mpt;
+    //    opts(argc, argv);
+    // unmount_prev(mpt);
+    // mkdir(mpt, 0700);
     umask(0);
     if (!s_root)
         s_root = getppid();
-    return fuse_main(sizeof(args) / sizeof(args[0]), args, &fsat_oper, 0);
+    return fuse_main(nargs, args, &fsat_oper, 0);
 }
