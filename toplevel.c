@@ -1,12 +1,14 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#include "types.h"
 #include "toplevel.h"
 #include "ppid.h"
 
-struct toplevel g_toplevel[MAX_TOPLEVEL] = {{0}};
+struct toplevel g_toplevel[MAX_TOPLEVEL];
 static uint32_t s_ntoplevel = 0;
-static int s_root = 0;
+static int s_root = -1;
 
 static int
 lookup_pid(int pid) {

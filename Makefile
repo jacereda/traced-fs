@@ -1,12 +1,13 @@
 OS=$(shell uname -s)
-SRCS=fs.c toplevel.c ppid_$(OS).c
+SRCS=fs.c op.c toplevel.c ppid_$(OS).c
+CFLAGS=-Wall
 
 all: fs fsd
 
 fs: $(SRCS)
-	$(CC) -DNDEBUG -O2 -fno-stack-protector -fomit-frame-pointer -Wall `pkg-config fuse --cflags --libs` $^ -o $@
+	$(CC) $(CFLAGS) -DNDEBUG -O2 -fno-stack-protector -fomit-frame-pointer -Wall `pkg-config fuse --cflags --libs` $^ -o $@
 
 fsd: $(SRCS)
-	$(CC) -g -O0 -Wall `pkg-config fuse --cflags --libs` $^ -o $@
+	$(CC) $(CFLAGS) -g -O0 `/usr/local/bin/pkg-config fuse --cflags --libs` $^ -o $@
 
 

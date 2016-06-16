@@ -39,8 +39,10 @@
 #include <sys/xattr.h>
 #endif
 
+#include "types.h"
 #include "ppid.h"
 #include "toplevel.h"
+#include "op.h"
 
 static const char *s_generator = 0;
 
@@ -50,14 +52,14 @@ struct dirh {
     struct dirent *entry;
     off_t offset;
     char path[PATH_MAX];
-    char reported[127];
+    char reported[OP_MAX];
 };
 
 struct fileh {
     struct toplevel *tl;
     int fd;
     char path[PATH_MAX];
-    char reported[127];
+    char reported[OP_MAX];
 };
 
 struct toplevel *
@@ -116,49 +118,32 @@ sszclamp(ssize_t min, ssize_t x, ssize_t max) {
 }
 
 static void
-op2(int o, const char *p1, const char *p2) {
+op2(enum op op, const char *p1, const char *p2) {
     struct toplevel *tl = lookup_toplevel();
-    char *p;
-    size_t s1 = strlen(p1);
-    size_t s2 = p2 ? strlen(p2) : 0;
-    size_t sofar;
-    size_t sz = 1               // op
-                + 1             // |
-                + s1            // p1
-                + (p2 ? 1 : 0)  // |
-                + s2            // p2
-                + 1             // \n
-        ;
-    sofar = __sync_fetch_and_add(&tl->sofar, sz);
-    if (sofar + sz < MAX_CAPACITY) {
-        p = tl->ops + sofar;
-        *p++ = o;
-        *p++ = '|';
-        memcpy(p, p1, s1);
-        p += s1;
-        if (p2) {
-            *p++ = '|';
-            memcpy(p, p2, s2);
-            p += s2;
-        }
-        *p++ = '\n';
-    } else {
-        fprintf(stderr, "Maximum capacity reached, wrapping\n");
-        tl->sofar = 0;
+    op_register(tl, op, p1, p2);
+}
+
+static void
+op1(enum op op, const char *p1) {
+    op2(op, p1, 0);
+}
+
+static void
+sop1(enum op op, char *reported, const char *p1) {
+    if (!reported[op]) {
+        op1(op, p1);
+        reported[op] = 1;
     }
 }
 
 static void
-op1(int o, const char *p1) {
-    op2(o, p1, 0);
+fop1(struct fileh *f, enum op op) {
+    sop1(op, f->reported, f->path);
 }
 
 static void
-sop1(int o, char *reported, const char *p1) {
-    if (!reported[o]) {
-        op1(o, p1);
-        reported[o] = 1;
-    }
+dop1(struct dirh *d, enum op op) {
+    sop1(op, d->reported, d->path);
 }
 
 static const char *s_ops = "/.ops";
@@ -247,7 +232,7 @@ getattr_cb(const char *path, struct stat *st) {
     } else
         r = lstat(path, st);
     if (0 == r)
-        op1('q', path);
+        op1(OP_QUERY, path);
     else if (generate(path))
         r = -getattr_cb(path, st);
     return 0 == r ? 0 : -errno;
@@ -262,7 +247,7 @@ fgetattr_cb(const char *path, struct stat *st, struct fuse_file_info *fi) {
     else
         r = stat_toplevel(f->tl, st);
     if (0 == r)
-        sop1('q', f->reported, f->path);
+        fop1(f, OP_QUERY);
     else if (generate(path))
         r = -fgetattr_cb(path, st, fi);
     return 0 == r ? 0 : -errno;
@@ -280,7 +265,7 @@ access_cb(const char *path, int mask) {
     } else
         r = access(path, mask);
     if (0 == r)
-        op1('q', path);
+        op1(OP_QUERY, path);
     else if (generate(path))
         r = -access_cb(path, mask);
     return 0 == r ? 0 : -errno;
@@ -292,7 +277,7 @@ readlink_cb(const char *path, char *buf, size_t size) {
     r = readlink(path, buf, size - 1);
     if (0 <= r) {
         buf[r] = '\0';
-        op1('r', path);
+        op1(OP_READ, path);
     } else if (generate(path))
         r = -readlink_cb(path, buf, size);
     return 0 <= r ? 0 : -errno;
@@ -335,6 +320,8 @@ readdir_cb(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
                 continue;
             snprintf(nm, sizeof(nm), "%d", tl->pid);
             stat_toplevel(tl, &st);
+            fprintf(stderr, "entry for %d\n", tl->pid);
+
             filler(buf, nm, &st, 0);
         }
     } else {
@@ -378,7 +365,7 @@ readdir_cb(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
             d->entry = 0;
             d->offset = nextoff;
         }
-        sop1('l', d->reported, d->path);
+        dop1(d, OP_LIST);
     }
     return 0;
 }
@@ -400,7 +387,7 @@ mknod_cb(const char *path, mode_t mode, dev_t rdev) {
     else
         r = mknod(path, mode, rdev);
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -408,7 +395,7 @@ static int
 mkdir_cb(const char *path, mode_t mode) {
     int r = mkdir(path, mode);
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -416,7 +403,7 @@ static int
 unlink_cb(const char *path) {
     int r = unlink(path);
     if (0 == r)
-        op1('d', path);
+        op1(OP_DELETE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -424,7 +411,7 @@ static int
 rmdir_cb(const char *path) {
     int r = rmdir(path);
     if (0 == r)
-        op1('d', path);
+        op1(OP_DELETE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -432,7 +419,7 @@ static int
 symlink_cb(const char *from, const char *to) {
     int r = symlink(from, to);
     if (0 == r)
-        op2('k', to, from);
+        op2(OP_LINK, to, from);
     return 0 == r ? 0 : -errno;
 }
 
@@ -440,7 +427,7 @@ static int
 rename_cb(const char *from, const char *to) {
     int r = rename(from, to);
     if (0 == r)
-        op2('m', to, from);
+        op2(OP_RENAME, to, from);
     return 0 == r ? 0 : -errno;
 }
 
@@ -448,7 +435,7 @@ static int
 link_cb(const char *from, const char *to) {
     int r = link(from, to);
     if (0 == r)
-        op2('k', to, from);
+        op2(OP_LINK, to, from);
     return 0 == r ? 0 : -errno;
 }
 
@@ -456,7 +443,7 @@ static int
 chmod_cb(const char *path, mode_t mode) {
     int r = chmod(path, mode);
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -464,7 +451,7 @@ static int
 chown_cb(const char *path, uid_t uid, gid_t gid) {
     int r = lchown(path, uid, gid);
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -472,7 +459,7 @@ static int
 truncate_cb(const char *path, off_t size) {
     int r = truncate(path, size);
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -487,7 +474,7 @@ ftruncate_cb(const char *path, off_t size, struct fuse_file_info *fi) {
         r = -1;
     }
     if (0 == r)
-        sop1('w', f->reported, f->path);
+        fop1(f, OP_WRITE);
     return 0 == r ? 0 : -errno;
 }
 
@@ -502,7 +489,7 @@ utimens_cb(const char *path, const struct timespec ts[2]) {
     int r = utime(path, &buf);
 #endif
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -525,7 +512,7 @@ create_cb(const char *path, mode_t mode, struct fuse_file_info *fi) {
         fi->purge_ubc = 1;
 #endif
         fi->fh = fillfh(f, path, fd, 0);
-        sop1('w', f->reported, f->path);
+        fop1(f, OP_WRITE);
     }
     return r;
 }
@@ -593,7 +580,7 @@ read_cb(const char *path, char *buf, size_t size, off_t offset,
     else
         r = read_ops(f->tl, buf, size, offset);
     if (0 <= r)
-        sop1('r', f->reported, f->path);
+        fop1(f, OP_READ);
     return 0 <= r ? r : -errno;
 }
 
@@ -609,7 +596,7 @@ write_cb(const char *path, const char *buf, size_t size, off_t offset,
         r = -1;
     }
     if (0 <= r)
-        sop1('w', f->reported, f->path);
+        fop1(f, OP_WRITE);
     return 0 <= r ? r : -errno;
 }
 
@@ -649,11 +636,8 @@ read_buf_cb(const char *path, struct fuse_bufvec **bufp, size_t size,
         free(src);
     if (!r) {
         *bufp = src;
-        sop1('r', f->reported, f->path);
-    } else if (!r) {
-        *bufp = src;
         r = sz;
-        sop1('r', f->reported, f->path);
+        fop1(f, OP_READ);
     }
     return r;
 }
@@ -670,7 +654,7 @@ write_buf_cb(const char *path, struct fuse_bufvec *buf, off_t offset,
         b->flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
         b->fd = f->fd;
         b->pos = offset;
-        sop1('w', f->reported, f->path);
+        fop1(f, OP_WRITE);
         r = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
     } else
         r = -ENOENT;
@@ -739,7 +723,7 @@ fallocate_cb(const char *path, int mode, off_t offset, off_t length,
     else
         r = posix_fallocate(f->fd, offset, length);
     if (0 == r)
-        sop1('w', f->reported, f->path);
+        fop1(f, OP_WRITE);
     return 0 == r ? 0 : -r;
 }
 #endif
@@ -771,7 +755,7 @@ setxattr_cb(const char *path, const char *name, const char *value, size_t size,
     int r = lsetxattr(path, name, value, size, flags);
 #endif
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 
@@ -796,7 +780,7 @@ getxattr_cb(const char *path, const char *name, char *value, size_t size
     int r = lgetxattr(path, name, value, size);
 #endif
     if (0 <= r)
-        op1('q', path);
+        op1(OP_QUERY, path);
     return 0 <= r ? r : -errno;
 }
 
@@ -832,7 +816,7 @@ listxattr_cb(const char *path, char *list, size_t size) {
     int r = llistxattr(path, list, size);
 #endif
     if (0 <= r)
-        op1('q', path);
+        op1(OP_QUERY, path);
     return 0 <= r ? r : -errno;
 }
 
@@ -851,7 +835,7 @@ removexattr_cb(const char *path, const char *name) {
     int r = lremovexattr(path, name);
 #endif
     if (0 == r)
-        op1('w', path);
+        op1(OP_WRITE, path);
     return 0 == r ? 0 : -errno;
 }
 #endif /* HAVE_SETXATTR */
