@@ -57,7 +57,7 @@ static uint32_t s_ntoplevel = 0;
 static int s_root = 0;
 static const char *s_generator = 0;
 
-struct fsat_dirh {
+struct dirh {
     DIR *dp;
     struct toplevel *tl;
     struct dirent *entry;
@@ -66,7 +66,7 @@ struct fsat_dirh {
     char reported[127];
 };
 
-struct fsat_fileh {
+struct fileh {
     struct toplevel *tl;
     int fd;
     char path[PATH_MAX];
@@ -138,7 +138,7 @@ lookup_toplevel() {
 }
 
 static uintptr_t
-fillfh(struct fsat_fileh *f, const char *path, int fd, struct toplevel *tl) {
+fillfh(struct fileh *f, const char *path, int fd, struct toplevel *tl) {
     f->fd = fd;
     f->tl = tl;
     strncpy(f->path, path, PATH_MAX);
@@ -148,7 +148,7 @@ fillfh(struct fsat_fileh *f, const char *path, int fd, struct toplevel *tl) {
 }
 
 static uintptr_t
-filldh(struct fsat_dirh *d, const char *path, DIR *dp, struct toplevel *tl) {
+filldh(struct dirh *d, const char *path, DIR *dp, struct toplevel *tl) {
     d->dp = dp;
     d->tl = tl;
     d->offset = 0;
@@ -159,14 +159,14 @@ filldh(struct fsat_dirh *d, const char *path, DIR *dp, struct toplevel *tl) {
     return (uintptr_t)d;
 }
 
-static inline struct fsat_dirh *
-dirh(struct fuse_file_info *fi) {
-    return (struct fsat_dirh *)(uintptr_t)fi->fh;
+static inline struct dirh *
+get_dirh(struct fuse_file_info *fi) {
+    return (struct dirh *)(uintptr_t)fi->fh;
 }
 
-static inline struct fsat_fileh *
-fileh(struct fuse_file_info *fi) {
-    return (struct fsat_fileh *)(uintptr_t)fi->fh;
+static inline struct fileh *
+get_fileh(struct fuse_file_info *fi) {
+    return (struct fileh *)(uintptr_t)fi->fh;
 }
 
 static ssize_t
@@ -305,7 +305,7 @@ stat_ops(const char *path, struct stat *st) {
 }
 
 static int
-fsat_getattr(const char *path, struct stat *st) {
+getattr_cb(const char *path, struct stat *st) {
     int r;
     if (is_ops(path))
         r = stat_ops(path, st);
@@ -319,13 +319,13 @@ fsat_getattr(const char *path, struct stat *st) {
     if (0 == r)
         op1('q', path);
     else if (generate(path))
-        r = -fsat_getattr(path, st);
+        r = -getattr_cb(path, st);
     return 0 == r ? 0 : -errno;
 }
 
 static int
-fsat_fgetattr(const char *path, struct stat *st, struct fuse_file_info *fi) {
-    struct fsat_fileh *f = fileh(fi);
+fgetattr_cb(const char *path, struct stat *st, struct fuse_file_info *fi) {
+    struct fileh *f = get_fileh(fi);
     int r;
     if (0 <= f->fd)
         r = fstat(f->fd, st);
@@ -334,12 +334,12 @@ fsat_fgetattr(const char *path, struct stat *st, struct fuse_file_info *fi) {
     if (0 == r)
         sop1('q', f->reported, f->path);
     else if (generate(path))
-        r = -fsat_fgetattr(path, st, fi);
+        r = -fgetattr_cb(path, st, fi);
     return 0 == r ? 0 : -errno;
 }
 
 static int
-fsat_access(const char *path, int mask) {
+access_cb(const char *path, int mask) {
     int r;
     if (is_ops(path))
         r = 0;
@@ -353,24 +353,24 @@ fsat_access(const char *path, int mask) {
     if (0 == r)
         op1('q', path);
     else if (generate(path))
-        r = -fsat_access(path, mask);
+        r = -access_cb(path, mask);
     return 0 == r ? 0 : -errno;
 }
 
 static int
-fsat_readlink(const char *path, char *buf, size_t size) {
+readlink_cb(const char *path, char *buf, size_t size) {
     int r;
     r = readlink(path, buf, size - 1);
     if (0 <= r) {
         buf[r] = '\0';
         op1('r', path);
     } else if (generate(path))
-        r = -fsat_readlink(path, buf, size);
+        r = -readlink_cb(path, buf, size);
     return 0 <= r ? 0 : -errno;
 }
 
 static int
-fsat_opendir(const char *path, struct fuse_file_info *fi) {
+opendir_cb(const char *path, struct fuse_file_info *fi) {
     DIR *dp = 0;
     struct toplevel *tl = 0;
     int r;
@@ -380,7 +380,7 @@ fsat_opendir(const char *path, struct fuse_file_info *fi) {
     } else
         dp = opendir(path);
     if (tl || dp) {
-        struct fsat_dirh *d = malloc(sizeof(*d));
+        struct dirh *d = malloc(sizeof(*d));
         if (d) {
             fi->fh = filldh(d, path, dp, tl);
             r = 0;
@@ -392,9 +392,9 @@ fsat_opendir(const char *path, struct fuse_file_info *fi) {
 }
 
 static int
-fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
-             struct fuse_file_info *fi) {
-    struct fsat_dirh *d = dirh(fi);
+readdir_cb(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
+           struct fuse_file_info *fi) {
+    struct dirh *d = get_dirh(fi);
 
     if (d->tl) {
         unsigned i;
@@ -455,8 +455,8 @@ fsat_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
 }
 
 static int
-fsat_releasedir(const char *path, struct fuse_file_info *fi) {
-    struct fsat_dirh *d = dirh(fi);
+releasedir_cb(const char *path, struct fuse_file_info *fi) {
+    struct dirh *d = get_dirh(fi);
     if (d->dp)
         closedir(d->dp);
     free(d);
@@ -464,7 +464,7 @@ fsat_releasedir(const char *path, struct fuse_file_info *fi) {
 }
 
 static int
-fsat_mknod(const char *path, mode_t mode, dev_t rdev) {
+mknod_cb(const char *path, mode_t mode, dev_t rdev) {
     int r;
     if (S_ISFIFO(mode))
         r = mkfifo(path, mode);
@@ -476,7 +476,7 @@ fsat_mknod(const char *path, mode_t mode, dev_t rdev) {
 }
 
 static int
-fsat_mkdir(const char *path, mode_t mode) {
+mkdir_cb(const char *path, mode_t mode) {
     int r = mkdir(path, mode);
     if (0 == r)
         op1('w', path);
@@ -484,7 +484,7 @@ fsat_mkdir(const char *path, mode_t mode) {
 }
 
 static int
-fsat_unlink(const char *path) {
+unlink_cb(const char *path) {
     int r = unlink(path);
     if (0 == r)
         op1('d', path);
@@ -492,7 +492,7 @@ fsat_unlink(const char *path) {
 }
 
 static int
-fsat_rmdir(const char *path) {
+rmdir_cb(const char *path) {
     int r = rmdir(path);
     if (0 == r)
         op1('d', path);
@@ -500,7 +500,7 @@ fsat_rmdir(const char *path) {
 }
 
 static int
-fsat_symlink(const char *from, const char *to) {
+symlink_cb(const char *from, const char *to) {
     int r = symlink(from, to);
     if (0 == r)
         op2('k', to, from);
@@ -508,7 +508,7 @@ fsat_symlink(const char *from, const char *to) {
 }
 
 static int
-fsat_rename(const char *from, const char *to) {
+rename_cb(const char *from, const char *to) {
     int r = rename(from, to);
     if (0 == r)
         op2('m', to, from);
@@ -516,7 +516,7 @@ fsat_rename(const char *from, const char *to) {
 }
 
 static int
-fsat_link(const char *from, const char *to) {
+link_cb(const char *from, const char *to) {
     int r = link(from, to);
     if (0 == r)
         op2('k', to, from);
@@ -524,7 +524,7 @@ fsat_link(const char *from, const char *to) {
 }
 
 static int
-fsat_chmod(const char *path, mode_t mode) {
+chmod_cb(const char *path, mode_t mode) {
     int r = chmod(path, mode);
     if (0 == r)
         op1('w', path);
@@ -532,7 +532,7 @@ fsat_chmod(const char *path, mode_t mode) {
 }
 
 static int
-fsat_chown(const char *path, uid_t uid, gid_t gid) {
+chown_cb(const char *path, uid_t uid, gid_t gid) {
     int r = lchown(path, uid, gid);
     if (0 == r)
         op1('w', path);
@@ -540,7 +540,7 @@ fsat_chown(const char *path, uid_t uid, gid_t gid) {
 }
 
 static int
-fsat_truncate(const char *path, off_t size) {
+truncate_cb(const char *path, off_t size) {
     int r = truncate(path, size);
     if (0 == r)
         op1('w', path);
@@ -548,9 +548,9 @@ fsat_truncate(const char *path, off_t size) {
 }
 
 static int
-fsat_ftruncate(const char *path, off_t size, struct fuse_file_info *fi) {
+ftruncate_cb(const char *path, off_t size, struct fuse_file_info *fi) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     if (0 <= f->fd)
         r = ftruncate(f->fd, size);
     else {
@@ -563,7 +563,7 @@ fsat_ftruncate(const char *path, off_t size, struct fuse_file_info *fi) {
 }
 
 static int
-fsat_utimens(const char *path, const struct timespec ts[2]) {
+utimens_cb(const char *path, const struct timespec ts[2]) {
 #ifdef HAVE_UTIMENSAT
     int r = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
 #else
@@ -578,9 +578,9 @@ fsat_utimens(const char *path, const struct timespec ts[2]) {
 }
 
 static int
-fsat_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+create_cb(const char *path, mode_t mode, struct fuse_file_info *fi) {
     int fd;
-    struct fsat_fileh *f;
+    struct fileh *f;
     int r = 0;
     assert(!is_ops(path));
     fd = open(path, fi->flags, mode);
@@ -611,8 +611,8 @@ open_ops(const char *path) {
 }
 
 static int
-fsat_open(const char *path, struct fuse_file_info *fi) {
-    struct fsat_fileh *f;
+open_cb(const char *path, struct fuse_file_info *fi) {
+    struct fileh *f;
     struct toplevel *tl;
     int fd = -1;
     int r = 0;
@@ -656,10 +656,10 @@ read_ops(struct toplevel *tl, char *buf, size_t size, off_t offset) {
 }
 
 static int
-fsat_read(const char *path, char *buf, size_t size, off_t offset,
-          struct fuse_file_info *fi) {
+read_cb(const char *path, char *buf, size_t size, off_t offset,
+        struct fuse_file_info *fi) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     if (0 <= f->fd)
         r = pread(f->fd, buf, size, offset);
     else
@@ -670,10 +670,10 @@ fsat_read(const char *path, char *buf, size_t size, off_t offset,
 }
 
 static int
-fsat_write(const char *path, const char *buf, size_t size, off_t offset,
-           struct fuse_file_info *fi) {
+write_cb(const char *path, const char *buf, size_t size, off_t offset,
+         struct fuse_file_info *fi) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     if (0 <= f->fd)
         r = pwrite(f->fd, buf, size, offset);
     else {
@@ -687,11 +687,11 @@ fsat_write(const char *path, const char *buf, size_t size, off_t offset,
 
 #if FUSE_MAKE_VERSION(2, 9) <= FUSE_VERSION
 static int
-fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
-              off_t offset, struct fuse_file_info *fi) {
+read_buf_cb(const char *path, struct fuse_bufvec **bufp, size_t size,
+            off_t offset, struct fuse_file_info *fi) {
     struct fuse_bufvec *src;
     struct fuse_buf *b = 0;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     struct toplevel *tl = f->tl;
     int fd = f->fd;
     ssize_t sz = 0;
@@ -731,11 +731,11 @@ fsat_read_buf(const char *path, struct fuse_bufvec **bufp, size_t size,
 }
 
 static int
-fsat_write_buf(const char *path, struct fuse_bufvec *buf, off_t offset,
-               struct fuse_file_info *fi) {
+write_buf_cb(const char *path, struct fuse_bufvec *buf, off_t offset,
+             struct fuse_file_info *fi) {
     struct fuse_bufvec dst = FUSE_BUFVEC_INIT(fuse_buf_size(buf));
     struct fuse_buf *b = dst.buf;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     int r;
     assert(0 <= f->fd);
     if (0 <= f->fd) {
@@ -750,9 +750,9 @@ fsat_write_buf(const char *path, struct fuse_bufvec *buf, off_t offset,
 }
 
 static int
-fsat_flock(const char *path, struct fuse_file_info *fi, int op) {
+flock_cb(const char *path, struct fuse_file_info *fi, int op) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     assert(0 <= f->fd);
     r = flock(f->fd, op);
     return r == 0 ? 0 : -errno;
@@ -761,15 +761,15 @@ fsat_flock(const char *path, struct fuse_file_info *fi, int op) {
 #endif
 
 static int
-fsat_statfs(const char *path, struct statvfs *stbuf) {
+statfs_cb(const char *path, struct statvfs *stbuf) {
     int r = statvfs(path, stbuf);
     return r == 0 ? 0 : -errno;
 }
 
 static int
-fsat_flush(const char *path, struct fuse_file_info *fi) {
+flush_cb(const char *path, struct fuse_file_info *fi) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
     if (0 <= f->fd)
         r = close(dup(f->fd));
     else
@@ -778,8 +778,8 @@ fsat_flush(const char *path, struct fuse_file_info *fi) {
 }
 
 static int
-fsat_release(const char *path, struct fuse_file_info *fi) {
-    struct fsat_fileh *f = fileh(fi);
+release_cb(const char *path, struct fuse_file_info *fi) {
+    struct fileh *f = get_fileh(fi);
     if (0 <= f->fd)
         close(f->fd);
     free(f);
@@ -787,9 +787,9 @@ fsat_release(const char *path, struct fuse_file_info *fi) {
 }
 
 static int
-fsat_fsync(const char *path, int isdatasync, struct fuse_file_info *fi) {
+fsync_cb(const char *path, int isdatasync, struct fuse_file_info *fi) {
     int r;
-    struct fsat_fileh *f = fileh(fi);
+    struct fileh *f = get_fileh(fi);
 #ifdef HAVE_FDATASYNC
     if (isdatasync)
         r = 0 <= f->fd ? fdatasync(f->fd) : 0;
@@ -801,9 +801,9 @@ fsat_fsync(const char *path, int isdatasync, struct fuse_file_info *fi) {
 
 #ifdef HAVE_POSIX_FALLOCATE
 static int
-fsat_fallocate(const char *path, int mode, off_t offset, off_t length,
-               struct fuse_file_info *fi) {
-    struct fsat_fileh *f = fileh(fi);
+fallocate_cb(const char *path, int mode, off_t offset, off_t length,
+             struct fuse_file_info *fi) {
+    struct fileh *f = get_fileh(fi);
     int r;
     assert(0 <= f->fd);
     if (mode)
@@ -818,13 +818,13 @@ fsat_fallocate(const char *path, int mode, off_t offset, off_t length,
 
 #ifdef HAVE_SETXATTR
 static int
-fsat_setxattr(const char *path, const char *name, const char *value,
-              size_t size, int flags
+setxattr_cb(const char *path, const char *name, const char *value, size_t size,
+            int flags
 #if defined __APPLE__
-              ,
-              uint32_t position
+            ,
+            uint32_t position
 #endif
-              ) {
+            ) {
 #if defined __APPLE__
     int r;
     if (!strncmp(name, XATTR_APPLE_PREFIX, sizeof(XATTR_APPLE_PREFIX) - 1)) {
@@ -848,12 +848,12 @@ fsat_setxattr(const char *path, const char *name, const char *value,
 }
 
 static int
-fsat_getxattr(const char *path, const char *name, char *value, size_t size
+getxattr_cb(const char *path, const char *name, char *value, size_t size
 #if defined __APPLE__
-              ,
-              uint32_t position
+            ,
+            uint32_t position
 #endif
-              ) {
+            ) {
 #if defined __APPLE__
     int r;
     if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
@@ -873,7 +873,7 @@ fsat_getxattr(const char *path, const char *name, char *value, size_t size
 }
 
 static int
-fsat_listxattr(const char *path, char *list, size_t size) {
+listxattr_cb(const char *path, char *list, size_t size) {
 #if defined __APPLE__
     ssize_t r = listxattr(path, list, size, XATTR_NOFOLLOW);
     if (0 < r) {
@@ -909,7 +909,7 @@ fsat_listxattr(const char *path, char *list, size_t size) {
 }
 
 static int
-fsat_removexattr(const char *path, const char *name) {
+removexattr_cb(const char *path, const char *name) {
 #if defined __APPLE__
     int r;
     if (strcmp(name, A_KAUTH_FILESEC_XATTR) == 0) {
@@ -930,63 +930,64 @@ fsat_removexattr(const char *path, const char *name) {
 
 #ifdef HAVE_LIBULOCKMGR
 static int
-fsat_lock(const char *path, struct fuse_file_info *fi, int cmd,
-          struct flock *lock) {
-    struct fsat_fileh *f = fileh(fi);
+lock_cb(const char *path, struct fuse_file_info *fi, int cmd,
+        struct flock *lock) {
+    struct fileh *f = get_fileh(fi);
     assert(0 <= f->fd);
     return ulockmgr_op(f->fd, cmd, lock, &fi->lock_owner,
                        sizeof(fi->lock_owner));
 }
 #endif
 
-static struct fuse_operations fsat_oper = {
-    .getattr = fsat_getattr,
-    .fgetattr = fsat_fgetattr,
-    .access = fsat_access,
-    .readlink = fsat_readlink,
-    .opendir = fsat_opendir,
-    .readdir = fsat_readdir,
-    .releasedir = fsat_releasedir,
-    .mknod = fsat_mknod,
-    .mkdir = fsat_mkdir,
-    .symlink = fsat_symlink,
-    .unlink = fsat_unlink,
-    .rmdir = fsat_rmdir,
-    .rename = fsat_rename,
-    .link = fsat_link,
-    .chmod = fsat_chmod,
-    .chown = fsat_chown,
-    .truncate = fsat_truncate,
-    .ftruncate = fsat_ftruncate,
-    .utimens = fsat_utimens,
-    .create = fsat_create,
-    .open = fsat_open,
-    .read = fsat_read,
-    .write = fsat_write,
-    .statfs = fsat_statfs,
-    .flush = fsat_flush,
-    .release = fsat_release,
-    .fsync = fsat_fsync,
+static struct fuse_operations oper = {
+    .getattr = getattr_cb,
+    .fgetattr = fgetattr_cb,
+    .access = access_cb,
+    .readlink = readlink_cb,
+    .opendir = opendir_cb,
+    .readdir = readdir_cb,
+    .releasedir = releasedir_cb,
+    .mknod = mknod_cb,
+    .mkdir = mkdir_cb,
+    .symlink = symlink_cb,
+    .unlink = unlink_cb,
+    .rmdir = rmdir_cb,
+    .rename = rename_cb,
+    .link = link_cb,
+    .chmod = chmod_cb,
+    .chown = chown_cb,
+    .truncate = truncate_cb,
+    .ftruncate = ftruncate_cb,
+    .utimens = utimens_cb,
+    .create = create_cb,
+    .open = open_cb,
+    .read = read_cb,
+    .write = write_cb,
+    .statfs = statfs_cb,
+    .flush = flush_cb,
+    .release = release_cb,
+    .fsync = fsync_cb,
 #ifdef HAVE_POSIX_FALLOCATE
-    .fallocate = fsat_fallocate,
+    .fallocate = fallocate_cb,
 #endif
 #ifdef HAVE_SETXATTR
-    .setxattr = fsat_setxattr,
-    .getxattr = fsat_getxattr,
-    .listxattr = fsat_listxattr,
-    .removexattr = fsat_removexattr,
+    .setxattr = setxattr_cb,
+    .getxattr = getxattr_cb,
+    .listxattr = listxattr_cb,
+    .removexattr = removexattr_cb,
 #endif
 #ifdef HAVE_LIBULOCKMGR
-    .lock = fsat_lock,
+    .lock = lock_cb,
 #endif
 #if FUSE_MAKE_VERSION(2, 9) <= FUSE_VERSION
-    .read_buf = fsat_read_buf,
-    .write_buf = fsat_write_buf,
-    .flock = fsat_flock,
+    .read_buf = read_buf_cb,
+    .write_buf = write_buf_cb,
+    .flock = flock_cb,
     .flag_nopath = 1,
 #endif
 };
 
+/*
 static void
 usage(const char *nm) {
     fprintf(stderr, "usage: %s [-r rootpid] [-g generator]\n", nm);
@@ -1020,10 +1021,10 @@ unmount_prev(const char *mpt) {
     unmount(mpt, 0);
 #endif
 }
+*/
 
 int
 main(int argc, char *argv[]) {
-    char *mpt = "traced";
     char *args[64];
     int nargs = argc;
     assert(argc < sizeof(args) / sizeof(args[0]));
@@ -1037,5 +1038,5 @@ main(int argc, char *argv[]) {
     umask(0);
     if (!s_root)
         s_root = getppid();
-    return fuse_main(nargs, args, &fsat_oper, 0);
+    return fuse_main(nargs, args, &oper, 0);
 }
