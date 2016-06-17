@@ -1,0 +1,28 @@
+name:                traced-fs-test
+version:             0.1.0.0
+author:              Jorge Acereda
+maintainer:          jacereda@gmail.com
+build-type:          Simple
+cabal-version:       >=1.10
+
+executable dummy
+  main-is: Dummy.hs
+  build-depends: base
+  hs-source-dirs: .
+  default-language:    Haskell2010
+
+
+test-suite traced-fs-test
+  main-is: Test.hs
+  type: exitcode-stdio-1.0
+  ghc-options: -Wall
+  build-depends: base
+               , QuickCheck
+               , filepath
+               , directory
+               , temporary
+               , process
+               , unix
+               , mtl
+  hs-source-dirs: .
+  default-language:    Haskell2010

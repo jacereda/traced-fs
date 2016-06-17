@@ -11,5 +11,19 @@ fsd: $(SRCS)
 	$(CC) $(CFLAGS) -g -O0 `pkg-config fuse --cflags --libs` $^ -o $@
 
 
+test: all
+	./fsd traced
+	-stat traced/.rootpid-$$PPID
+	cp traced/bin/ls traced/tmp/foo
+	mv traced/tmp/foo traced/tmp/bar
+	touch traced/tmp/bar
+	rm traced/tmp/bar
+	sh -c "cp traced/bin/ls traced/tmp/foo && mv traced/tmp/foo traced/tmp/bar && rm traced/tmp/bar"
+	cc -c -D_GNU_SOURCE -D_BSD_SOURCE=1 -std=c99 -Wall traced/`pwd`/src/toplevel.c -o traced/tmp/toplevel.o
+	ls -l traced/.ops/
+	cat traced/.ops/*
+	umount traced
+
+
 htest: all
 	cd test && stack test
