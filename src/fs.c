@@ -320,8 +320,6 @@ readdir_cb(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
                 continue;
             snprintf(nm, sizeof(nm), "%d", tl->pid);
             stat_toplevel(tl, &st);
-            fprintf(stderr, "entry for %d\n", tl->pid);
-
             filler(buf, nm, &st, 0);
         }
     } else {
