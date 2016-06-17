@@ -34,8 +34,7 @@ calc_toplevel_pid(int pid) {
 
 struct toplevel *
 toplevel_lookup(int pid) {
-    int tlpid = calc_toplevel_pid(pid);
-    int tli = lookup_pid(tlpid);
+    int tli = lookup_pid(pid);
     return 0 <= tli ? g_toplevel + tli : 0;
 }
 
